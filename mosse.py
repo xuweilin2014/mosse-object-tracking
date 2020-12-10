@@ -9,10 +9,24 @@ This module implements the basic correlation filter based tracking algorithm -- 
 为中心的一个小跟踪窗口来选择的。从这点上来说，跟踪器和滤波器训练是一起进行的。通过在下一帧图片的搜索
 窗口中去进行滤波来跟踪目标。滤波之后产生的最大值的地方就是目标的新位置。根据得到的新位置完成在线更新。
 
-Correlation Filter应用于tracking方面最朴素的想法就是：相关是衡量两个信号相似值的度量，如果两个信号越相似，那么其相关值就越高，
-而在tracking的应用里，就是需要设计一个滤波模板，使得当它作用在跟踪目标上时，得到的响应最大
-"""
+Correlation Filter应用于tracking方面最朴素的想法就是：相关是衡量两个信号相似值的度量，如果两个信号越相似，
+那么其相关值就越高，而在tracking的应用里，就是需要设计一个滤波模板，使得当它作用在跟踪目标上时，得到的响应最大.
 
+相关滤波的意思就是现在在第一帧图像中框选了一个目标，然后对这个目标训练一个滤波器（大小相同）使得其输出响应 g 在中间值最大。
+其中输入图像给定，响应图也是可以直接生成的，一般都是用高斯函数，中间值最大，旁边逐渐降低。
+
+MOSSE 算法的流程如下:
+1.第一帧中以目标对象为中心截取一个目标窗口 [width, height]，获得目标在第一帧位置数据
+2.生成一个和原图像大小相同的二维高斯响应矩阵，然后截取上面所选定的目标区域，然后进行快速傅立叶变换，得到响应 G
+3.对第一帧，更新过滤器参数 Ai, Bi
+4.读取第 n 帧图像，以第 n - 1 帧目标位置信息截取输入图像得到 fi
+5.对 fi 进行快速傅立叶变换得到 Fi，将第 n - 1 帧中更新得到的过滤器 Ai 和 Bi 相除得到过滤器 Hi，将 Hi 和 Fi 进行
+点乘，得到实际卷积输出 Gi，然后再对 Gi 进行反傅立叶变换得到实际输出 g
+6.g 中的最大值位置也就是当前第 n 帧中目标所在的位置，更新当前帧中目标区域的位置 clip_pos
+7.使用更新后的目标区域的位置重新进行截取，得到新的 fi
+8.更新过滤器参数 Ai, Bi
+9.重复 4-8 步，直到程序结束
+"""
 
 class Mosse:
     def __init__(self, args, img_path):
@@ -65,6 +79,11 @@ class Mosse:
                 pos = init_gt.copy()
                 clip_pos = np.array([pos[0], pos[1], pos[0] + pos[2], pos[1] + pos[3]]).astype(np.int64)
             else:
+                '''
+                在当前帧中，使用上一帧更新后的搜索区域 (clip_pos) 在本帧中截取相同的位置，使用过滤器与截取区域执行相关操作
+                相关性最大的位置就是响应最大值的位置，然后更新过滤器 (Ai, Bi)，更新搜索区域 (clip_pos)。
+                '''
+
                 Hi = Ai / Bi
                 fi = frame_gray[clip_pos[1]:clip_pos[3], clip_pos[0]:clip_pos[2]]
                 fi = pre_process(cv2.resize(fi, (init_gt[2], init_gt[3])))
@@ -100,6 +119,7 @@ class Mosse:
 
                 # online update...
                 # 在线更新 Ai, Bi
+                # 这里的 lr 就是 learning rate，学习率，加入 lr 可以使得模型更加重视最近的帧，并且使得先前的帧的效果随时间衰减
                 Ai = self.args.lr * (G * np.conjugate(np.fft.fft2(fi))) + (1 - self.args.lr) * Ai
                 Bi = self.args.lr * (np.fft.fft2(fi) * np.conjugate(np.fft.fft2(fi))) + (1 - self.args.lr) * Bi
 
@@ -154,8 +174,12 @@ class Mosse:
 
         # cal the distance...
         # 创建一个以选定的目标中点为中心，且符合二维高斯分布的响应矩阵，矩阵大小等于原图像 img 的大小
+        # 原始的二维高斯函数中，方差有两个: sigmaX 和 sigmaY，其中 sigmaX 为 x 方向的方差，sigmaY 为 y 方向的方差
+        # 不过这里取相同的值，使得二维高斯模型在平面上的投影就是一个圆形，意思是与目标中心 (x0, y0) 的距离一样的点的权重是一样的，
+        # 如果取不一样的值，那么投影为一个椭圆形，距离目标中心会得到不一样的权重
         exponent = (np.square(xx - center_x) + np.square(yy - center_y)) / (2 * self.args.sigma)
         # get the response map...
+        # 获取到高斯响应矩阵
         response = np.exp(-exponent)
 
         # normalize...
