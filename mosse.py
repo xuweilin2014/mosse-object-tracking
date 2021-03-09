@@ -24,9 +24,10 @@ MOSSE 算法的流程如下:
 点乘，得到实际卷积输出 Gi，然后再对 Gi 进行反傅立叶变换得到实际输出 g
 6.g 中的最大值位置也就是当前第 n 帧中目标所在的位置，更新当前帧中目标区域的位置 clip_pos
 7.使用更新后的目标区域的位置重新进行截取，得到新的 fi
-8.更新过滤器参数 Ai, Bi
+8.使用新的 Fi 和 G 来更新过滤器参数 Ai, Bi
 9.重复 4-8 步，直到程序结束
 """
+
 
 class Mosse:
     def __init__(self, args, img_path):
@@ -46,7 +47,7 @@ class Mosse:
         init_frame = init_frame.astype(np.float32)
 
         # get the init ground truth.. [x, y, width, height]
-        # 这里通过手工框出想要选择的目标区域
+        # 这里通过手工框出想要选择的目标区域 [x, y, width, height]，其中 x 和 y 表示的是目标区域左上角顶点的坐标
         init_gt = cv2.selectROI('demo', init_img, False, False)
         init_gt = np.array(init_gt).astype(np.int64)
 
@@ -56,8 +57,9 @@ class Mosse:
 
         # start to create the training set ...
         # get the goal...
-        # 抽取框选区域的图像及其高斯响应
+        # 抽取高斯响应矩阵，矩阵的大小和选中的 ROI 的大小相同。
         g = response_map[init_gt[1]:init_gt[1] + init_gt[3], init_gt[0]:init_gt[0] + init_gt[2]]
+        # 抽取目标区域的图像
         fi = init_frame[init_gt[1]:init_gt[1] + init_gt[3], init_gt[0]:init_gt[0] + init_gt[2]]
         # 对目标区域的高斯响应图做快速傅立叶变换
         G = np.fft.fft2(g)
@@ -77,6 +79,7 @@ class Mosse:
                 Ai = self.args.lr * Ai
                 Bi = self.args.lr * Bi
                 pos = init_gt.copy()
+                # pos 的内容是 [leftX, topY, roi width, roi height]
                 clip_pos = np.array([pos[0], pos[1], pos[0] + pos[2], pos[1] + pos[3]]).astype(np.int64)
             else:
                 '''
@@ -84,17 +87,19 @@ class Mosse:
                 相关性最大的位置就是响应最大值的位置，然后更新过滤器 (Ai, Bi)，更新搜索区域 (clip_pos)。
                 '''
 
+                # Ai 和 Bi 在上一帧中已经更新了，现在重新计算出滤波模板 Hi
                 Hi = Ai / Bi
                 fi = frame_gray[clip_pos[1]:clip_pos[3], clip_pos[0]:clip_pos[2]]
                 fi = pre_process(cv2.resize(fi, (init_gt[2], init_gt[3])))
 
+                # 使用 Hi 和 fi 进行卷积操作，得到一个响应矩阵
                 Gi = Hi * np.fft.fft2(fi)
                 # 对于频域下的 Gi 进行逆傅立叶变换得到实际的 gi
                 gi = linear_mapping(np.fft.ifft2(Gi))
 
-                # find the max pos...
+                # 找到响应矩阵 gi 中的最大值
                 max_value = np.max(gi)
-                # 获取到 gi 中最大值的坐标，这个位置就是当前帧中目标的坐标，只不过这个坐标是相对于 gi，也就是目标区域而言的
+                # 获取到 gi 中最大值的坐标，这个位置就是当前帧中被跟踪目标的坐标，只不过这个坐标是相对于 gi，也就是目标区域而言的
                 max_pos = np.where(gi == max_value)
                 # gi.shape[0] / 2 就是上一个目标的 y 坐标，也是相对于 gi 这个区域而言，相减得到的 dy 就是当前目标与上一个目标在 y 方向的偏移量
                 dy = int(np.mean(max_pos[0]) - gi.shape[0] / 2)
@@ -102,6 +107,9 @@ class Mosse:
                 dx = int(np.mean(max_pos[1]) - gi.shape[1] / 2)
 
                 # update the position...
+                # pos 的内容是 [leftX, topY, roi width, roi height]，也就是 roi 目标框左上角的坐标与目标框的宽 width 和高 height
+                # 这里只是单纯的将 roi 目标框左上角的坐标进行移动，而对 roi 的长和宽不进行修改，因此 mosse 滤波无法处理跟踪目标的大
+                # 小发生变化的情况
                 pos[0] = pos[0] + dx
                 pos[1] = pos[1] + dy
 
@@ -124,7 +132,7 @@ class Mosse:
                 Bi = self.args.lr * (np.fft.fft2(fi) * np.conjugate(np.fft.fft2(fi))) + (1 - self.args.lr) * Bi
 
             # visualize the tracking process...
-            cv2.rectangle(current_frame, (pos[0], pos[1]), (pos[0] + pos[2], pos[1] + pos[3]), (255, 0, 0), 2)
+            cv2.rectangle(current_frame, (pos[0], pos[1]), (pos[0] + pos[2], pos[1] + pos[3]), (0, 0, 255), 2)
             cv2.imshow('demo', current_frame)
             cv2.waitKey(100)
 
@@ -137,6 +145,7 @@ class Mosse:
 
     # pre train the filter on the first frame...
     def _pre_training(self, init_frame, G):
+        # G 的大小就是选中的目标区域的大小
         height, width = G.shape
         fi = cv2.resize(init_frame, (width, height))
         # pre-process img..
